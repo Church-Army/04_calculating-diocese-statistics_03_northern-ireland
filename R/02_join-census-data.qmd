@@ -1,0 +1,118 @@
+---
+title: "Joining Census Data"
+format: html
+editor: visual
+---
+
+## Libraries
+
+```{r libraries}
+library(here)
+library(fs)
+
+library(sf)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(vroom)
+```
+
+## Read data
+
+### Read dioceses
+
+```{r readDioceses}
+#| cache: true
+dioceses <- read_sf(
+  here("geospatial-data", "coi-dioceses-as-small-area-conglomerations.geojson")) |> 
+  as.data.frame() |> 
+  select(-geometry)
+
+dioceses <- 
+  filter(dioceses, diocese %in% c("Down and Dromore", "Connor"))
+
+unique(dioceses[["type"]])
+```
+
+### Read census data
+
+```{r readCensusData}
+census_read <- function(x){
+  census_dir <- here("census-data")
+  
+  file_name <-
+    str_c("northern-ireland", x, "dz", "2021", sep = "_") |> 
+    str_c(".RDS")
+  
+  readRDS(here(census_dir, file_name))
+}
+
+stats <- c("age-five-year", "age-single-year", "ethnicity",
+           "ethnicity-harmonised", "general-health", 
+           "hours-worked", "household-composition",
+           "household-deprivation", "religion")
+
+names(stats) <- stats
+
+stats <- map(stats, census_read)
+```
+
+## Join census data to dioceses
+
+```{r joinCensusDataToDioceses}
+dioceses <- 
+  map(stats, 
+      function(stat){
+        left_join(dioceses, stat, by = c("area_code" = "dz_2021_code")) |> 
+          rename(dz_2021_code = area_code) 
+      })
+```
+
+## Summarise and save
+
+### Summarise
+
+```{r summarize}
+diocesan_tables <- 
+  map(dioceses, \(x){
+    as.data.frame(x) |> 
+      group_by(diocese) |> 
+      summarise(across(where(is.numeric), sum))
+  })
+```
+
+### Save
+
+```{r saveSummary}
+dio_stats <- dir_create(here("diocesan-stats"))
+
+summary_tables <- dir_create(dio_stats, "diocesan-totals")
+
+iwalk(diocesan_tables,
+      \(table, stat_name){
+        file_name <-
+          str_c("ni-dioceses", stat_name, "2022", sep = "_") |> 
+          str_c(".csv")
+        
+        save_path <- file.path(summary_tables, file_name)
+        
+        vroom_write(table, save_path, delim = ",")
+      })
+```
+
+```{r saveSmallAreas}
+
+sa_dir <- dir_create(dio_stats, "diocesan-stats-by-civic-area")
+
+iwalk(dioceses,
+      \(stat_table, stat_name){
+
+        save_path <-
+          str_c("northern-ireland_dioceses", stat_name, "dz", "2022", sep = "_") |> 
+          str_c(".csv")
+        
+        save_path <- file.path(sa_dir, save_path)
+                
+        vroom_write(stat_table, save_path, delim = ",")
+        })
+```

@@ -1,0 +1,201 @@
+---
+title: "Analysing overlaps"
+author: "Dave"
+format: html
+editor: visual
+---
+
+## Libraries
+
+```{r libraries}
+library(here)
+library(fs)
+
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(purrr)
+library(tidyr)
+
+library(carutools)
+```
+
+## Read in Data
+
+### Read in CoM shapes
+
+```{r readInData}
+com_dirs <- dir_ls(here("geospatial-data", "com-areas"))
+com_names <- str_extract(com_dirs, "(?<=/)[^/]+(?=$)")
+
+names(com_dirs) <- com_names
+
+com_shapes <- map(com_dirs, read_sf)
+```
+
+### Read in diocesan shapes
+
+```{r readInDioceses}
+#| cache: true
+dioceses <- read_sf(
+  here("geospatial-data", "coi-dioceses-as-small-area-conglomerations.geojson"))
+```
+
+### Reproject CoM shapes to diocesan crs
+
+```{r reproject}
+com_shapes <- map(com_shapes, \(x) st_transform(x, st_crs(dioceses)))
+```
+
+And bind_rows
+
+```{r bindRowsCom}
+com <-
+  bind_rows(com_shapes) |> 
+  select(-id) |> 
+  mutate(com_name = com_names) |> 
+  relocate(com_name) 
+
+rm(com_shapes, com_names, com_dirs)
+```
+
+### Read in census data
+
+Note that these populations are from different times, so this is a bit cheeky.
+
+```{r readCensusData}
+ni_pop <- readRDS(
+  here("census-data", "northern-ireland_age-five-year_dz_2021.RDS"))
+
+roi_pop <- readRDS(
+  here("census-data", "republic-of-ireland_age_sa_2016.RDS")
+)
+
+ni_pop_tmp <- 
+  select(ni_pop, -dz_2021_code) |> 
+  as.matrix() |> 
+  rowSums()
+
+roi_pop_tmp <- 
+  select(roi_pop, -sa_2015_code) |> 
+  as.matrix() |> 
+  rowSums()
+
+ni_pop = tibble(code = ni_pop[["dz_2021_code"]],
+                population = ni_pop_tmp,
+                type = "NI data zone 2021")
+
+roi_pop = tibble(code = roi_pop[["sa_2015_code"]],
+                 population = roi_pop_tmp,
+                 type = "ROI small area 2015")
+
+population = 
+  rbind(ni_pop, roi_pop) |> 
+  mutate(
+    type = factor(type),
+    code = str_remove(code, "SA2017_"))
+
+rm(ni_pop, ni_pop_tmp, roi_pop, roi_pop_tmp)
+
+dir_create(here("data"))
+saveRDS(population, here("data", "ni-and-roi_small-area-populations.RDS"))
+```
+
+## Plot
+
+### Get overlapping dioceses
+
+```{r plot}
+
+intersections <- st_intersects(com, dioceses, sparse = FALSE)
+
+com <- mutate(com, row_num = row_number())
+com <- rowwise(com)
+
+dioceses <- rename(dioceses, sa_geometry = geometry)
+
+com <- 
+  mutate(
+    com,
+    intersecting_small_areas =
+      list(
+        dioceses[
+          intersections[row_num, ],
+          c("sa_geometry", "area_code", "diocese")
+          ]
+        )) |>
+
+  unnest(intersecting_small_areas) |> 
+  select(-row_num)
+
+ggplot(com) + 
+  geom_sf(aes(geometry = sa_geometry, fill = diocese, colour = com_name)) +
+  ca_scale_fill_discrete() + 
+  ca_scale_colour_discrete()
+```
+
+Okay for the sake of simplicity let's just say that Newry belongs to Armagh Diocese. What do these dioceses look like?
+
+```{r plotDioceses}
+dioceses |> 
+  filter(diocese %in% c("Armagh", "Connor")) |> 
+  ggplot() +
+  geom_sf(aes(colour = type, fill = diocese)) + 
+  ca_scale_fill_discrete()
+```
+
+Okay so the Diocese of Armagh is partly in the Republic of Ireland. Let's find out what % of its population lives there.
+
+## Join population data
+
+```{r joinPopulationData}
+dioceses <- 
+  select(dioceses, -type) |> 
+  left_join(population, by = c("area_code" = "code")) 
+
+dioceses |> 
+  as.data.frame() |> 
+  select(-sa_geometry) |> 
+  filter(diocese == "Armagh") |> 
+  summarise(population = sum(population), .by = type) |> 
+  mutate(percent = scales::percent(population/sum(population)))
+```
+
+Okay so about a quarter of the population of the diocese of Connor live in the Republic of Ireland. How close is our CoM to the border?
+
+### CoM location
+
+```{r comLocation}
+diocesan_areas <- 
+  dioceses |> 
+  filter(diocese %in% c("Armagh")) |> 
+  group_by(type) |> 
+  summarise(sa_geometry = st_union(sa_geometry))
+
+com |> 
+  filter(com_name == "newry") |> 
+  ggplot(fill = ca_gold(), col = "black") +
+  geom_sf() + 
+  geom_sf(data = diocesan_areas, 
+          aes(fill = type), colour = NA,
+          alpha = 0.35)
+```
+
+Okay so it is very much in Northern Ireland, but close the border and in a diocese where 25% of the population live in the Republic.
+
+## News just in!
+
+The website says the Newry is a partnership between CA and the Diocese of Down and Dromore, so let's assume my data are wrong (or the CoM is just situated mostly outside the diocese).
+
+```{r plotAgain}
+dioceses |> 
+  filter(diocese %in% c("Armagh", "Connor", "Down and Dromore")) |> 
+  ggplot() +
+  geom_sf(aes(colour = type, fill = diocese)) + 
+  ca_scale_fill_discrete() +
+  geom_sf(data = filter(com, com_name == "newry"),
+          fill = "black", colour = NA)
+```
+
+Brilliant! We use the diocese of Down and Dromore and nothing needs to be complicated.

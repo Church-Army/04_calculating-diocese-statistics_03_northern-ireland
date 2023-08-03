@@ -1,0 +1,12 @@
+.Rproj.user
+/geospatial-data/coi-dioceses*
+*.html
+R/*_files
+*.xlsx
+/.Rhistory
+.Rhistory
+.Rdata
+.httr-oauth
+.DS_Store
+.quarto
+diocesan-stats/diocesan-stats-by-civic-area
